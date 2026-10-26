@@ -1,232 +1,143 @@
-# Reparar Ubuntu 26.04 tras `do-release-upgrade` fallido — NVMe no detectado en arranque
+# 🛠️ Ubuntu 26.04 Recovery — do-release-upgrade NVMe Boot Fix
 
-> **Síntoma principal:** Después de actualizar de Ubuntu 24.04 a 26.04, el sistema cae en una shell de `initramfs` (BusyBox o dracut) y no puede montar el disco raíz. El disco NVMe no aparece en `/dev/nvme*`.
+[![Ubuntu](https://img.shields.io/badge/Ubuntu-26.04_LTS-E95420?logo=ubuntu&logoColor=white)](https://ubuntu.com)
+[![License](https://img.shields.io/badge/License-CC_BY_4.0-lightgrey)](https://creativecommons.org/licenses/by/4.0/)
+[![Tested](https://img.shields.io/badge/tested-October_2026-blue)](.)
+[![Contributions Welcome](https://img.shields.io/badge/contributions-welcome-brightgreen)](CONTRIBUTING.md)
+[![Stars](https://img.shields.io/github/stars/TU_USUARIO/ubuntu-26-upgrade-recovery?style=social)](.)
 
----
-
-## ¿Por qué ocurre esto?
-
-Ubuntu 26.04 introdujo dos cambios importantes respecto a 24.04:
-
-1. **Cambió el generador de initramfs:** de `initramfs-tools` a `dracut`. Si el upgrade se interrumpe (por falta de espacio, luz, red, etc.), `dracut` puede quedar sin instalar.
-2. **Los módulos del kernel quedan en estado `half-installed`:** El nuevo kernel (`7.0.0-34-generic`) se instala pero sus módulos `.ko` quedan de una versión intermedia. Esto produce el error `Exec format error` al intentar cargarlos, y el disco NVMe nunca aparece.
-
-Ambos problemas combinados hacen que el sistema arranque en la shell de emergencia sin poder acceder al disco.
+> **Una guía nacida de una noche entera de depuración en tiempo real.**  
+> Si llegaste acá desde Google porque tu Ubuntu no arranca después del upgrade, estás en el lugar correcto.
 
 ---
 
-## Requisitos
+## 📖 La historia detrás de esta guía
 
-- Un USB booteable de **Ubuntu Live** o **Linux Mint Live** (cualquier versión reciente basada en Ubuntu).
-- Acceso físico al equipo.
-- El disco raíz de Ubuntu en **`/dev/nvme0n1p5`** (ajustá según tu caso — verificalo con `lsblk`).
+Todo empezó como algo rutinario: un usuario ejecutó `sudo do-release-upgrade` para actualizar su sistema de Ubuntu 24.04 LTS a Ubuntu 26.04 LTS. El proceso empezó bien, pero en algún punto — ya sea por una interrupción, un timeout, o simplemente mala suerte — **el upgrade quedó incompleto**.
 
----
+Al reiniciar, en lugar del escritorio habitual, apareció una pantalla negra con texto blanco. Primero fue la shell clásica de BusyBox:
 
-## Paso 1: Identificar tus particiones
-
-Arrancá desde el USB Live y abrí una terminal:
-
-```bash
-sudo lsblk -f
-sudo blkid
+```
+BusyBox v1.37.0 (Ubuntu) built-in shell (ash)
+(initramfs) _
 ```
 
-Anotá:
+Después de varios intentos de reparación, evolucionó a la shell de dracut:
 
-- Tu **partición raíz** de Ubuntu (tipo `ext4`, generalmente `/dev/nvme0n1p5` o similar)
-- Tu **partición EFI** (tipo `vfat`, generalmente `/dev/nvme0n1p1`)
-
----
-
-## Paso 2: Montar el sistema y entrar al chroot
-
-Reemplazá `nvme0n1p5` y `nvme0n1p1` por tus particiones reales:
-
-```bash
-sudo mkdir -p /mnt/rescate
-sudo mount /dev/nvme0n1p5 /mnt/rescate
-sudo mount /dev/nvme0n1p1 /mnt/rescate/boot/efi
-
-for i in dev proc sys run; do
-  sudo mount --bind /$i /mnt/rescate/$i
-done
-
-sudo mount --bind /sys/firmware/efi/efivars /mnt/rescate/sys/firmware/efi/efivars
-
-sudo chroot /mnt/rescate
+```
+[FAILED] Failed to start systemd-modules-load.service
+Warning: "/dev/disk/by-uuid/237a6d59-b228-4345-94c4-5f219f17a6cd" does not exist
+dracut:/root# _
 ```
 
-> 💡 **Tip:** Podés crear un script con estos comandos para no repetirlos cada vez que entrés al Live USB.
+**El disco NVMe había desaparecido para el sistema.** No se trataba de datos perdidos — el disco físicamente estaba ahí, funcionando perfectamente. El problema era que el kernel no podía cargar los drivers necesarios para acceder a él durante el arranque.
 
----
+### El camino de diagnóstico
 
-## Paso 3: Verificar el estado del problema
+Lo que siguió fue una sesión de diagnóstico exhaustiva que duró varias horas y reveló **tres capas de problemas encadenados**, cada una más profunda que la anterior:
 
-Dentro del chroot, verificá si `dracut` está instalado:
+**Capa 1 — La pista falsa del UUID:**  
+Los primeros errores decían que el UUID del disco no existía. Se revisó el `/etc/fstab`, se compararon los UUIDs con `blkid`, todo coincidía perfectamente. El fstab estaba sano.
 
-```bash
-dpkg -l dracut dracut-core | tail -2
+**Capa 2 — El cambio silencioso de Ubuntu 26.04:**  
+Ubuntu 26.04 es la primera versión LTS en migrar de `initramfs-tools` a `dracut` como generador de initramfs. Este cambio no se completó durante el upgrade interrumpido. `dracut` no estaba instalado, pero el sistema lo necesitaba. Cada intento de regenerar el initramfs con `update-initramfs -u` (el comando "clásico") parecía funcionar, pero la imagen generada era **ignorada por completo** — GRUB usaba la de dracut, que no existía correctamente.
+
+**Capa 3 — La causa raíz real:**  
+Incluso después de instalar dracut, el problema persistía. El diagnóstico desde la shell de dracut reveló el error definitivo:
+
 ```
-
-- Si muestra `un` (uninstalled) → dracut falta, continuá al **Paso 4A**.
-- Si muestra `ii` (installed) → dracut está, pero los módulos del kernel pueden estar corruptos, continuá al **Paso 4B**.
-
-Verificá también el estado de los módulos del kernel:
-
-```bash
-modinfo -F vermagic /lib/modules/$(ls /lib/modules | tail -1)/kernel/drivers/nvme/host/nvme.ko.zst
-```
-
-Este comando debe devolver exactamente la misma versión que el kernel instalado (ej: `7.0.0-34-generic`). Si devuelve una versión diferente, los módulos están corruptos → **Paso 4B**.
-
----
-
-## Paso 4A: Instalar dracut (si falta)
-
-```bash
-apt update
-apt install dracut dracut-core
-```
-
-Luego continuá con el **Paso 5**.
-
----
-
-## Paso 4B: Reinstalar el kernel completo (módulos corruptos)
-
-Este es el paso más importante y la causa raíz del problema:
-
-```bash
-# Reparar paquetes a medio instalar
-dpkg --configure -a
-apt --fix-broken install
-
-# Reinstalar kernel y módulos completos
-apt install --reinstall linux-image-$(uname -r 2>/dev/null || ls /boot/vmlinuz-* | tail -1 | sed 's/.*vmlinuz-//')
-apt install --reinstall linux-modules-$(ls /boot/vmlinuz-* | tail -1 | sed 's/.*vmlinuz-//')
-
-# Verificar que ahora coinciden
-KVER=$(ls /lib/modules | sort -V | tail -1)
-modinfo -F vermagic /lib/modules/$KVER/kernel/drivers/nvme/host/nvme.ko.zst
-```
-
-La última línea debe mostrar exactamente `$KVER SMP preempt mod_unload modversions`.
-
----
-
-## Paso 5: Regenerar el initramfs con dracut
-
-```bash
-# Regenerar para todos los kernels instalados
-for KVER in $(ls /lib/modules); do
-  echo "Regenerando initramfs para $KVER..."
-  dracut --force --no-hostonly \
-    /boot/initrd.img-$KVER \
-    $KVER
-done
-
-# Verificar que el módulo nvme quedó incluido
-KVER=$(ls /lib/modules | sort -V | tail -1)
-lsinitrd /boot/initrd.img-$KVER | grep nvme | head -5
-```
-
-Debe mostrar rutas de módulos nvme. Si no muestra nada, algo falló en el Paso 4B.
-
----
-
-## Paso 6: Reinstalar GRUB y regenerar configuración
-
-```bash
-# Reinstalar GRUB para UEFI
-grub-install --target=x86_64-efi \
-  --efi-directory=/boot/efi \
-  --bootloader-id=ubuntu \
-  --recheck
-
-# Regenerar grub.cfg (detecta Ubuntu y Windows si hay dual boot)
-update-grub
-```
-
----
-
-## Paso 7: Terminar y reiniciar
-
-```bash
-# Terminar triggers pendientes de dpkg
-dpkg --configure -a
-
-exit
-sudo umount -R /mnt/rescate
-sudo reboot
-```
-
-Retirá el USB Live cuando el equipo reinicie.
-
----
-
-## Paso 8: Dentro de Ubuntu 26.04 — limpieza final
-
-Una vez que el sistema arranque correctamente:
-
-```bash
-# Terminar la actualización que quedó incompleta
-sudo dpkg --configure -a
-sudo apt --fix-broken install
-sudo apt full-upgrade
-
-# Limpiar kernels viejos si quedaron
-sudo apt autoremove --purge
-```
-
----
-
-## Diagnóstico adicional: si el sistema sigue sin arrancar
-
-Si después de todos los pasos anteriores el sistema sigue cayendo en la shell de dracut, ejecutá esto desde esa shell para obtener más información:
-
-```bash
-# ¿El disco NVMe es visible?
-ls /dev/nvme*
-
-# ¿Qué UUID busca el kernel?
-cat /proc/cmdline
-
-# ¿Ese UUID existe?
-ls /dev/disk/by-uuid/
-
-# Intentar cargar el módulo manualmente
 modprobe nvme_core
-modprobe nvme
-ls /dev/nvme*
+→ ERROR: could not insert 'nvme_core': Exec format error
+```
 
-# Si modprobe falla con 'Exec format error' → ir al Paso 4B
-# Si modprobe funciona pero el disco no aparece → problema de hardware o BIOS
+Los módulos del kernel (`.ko.zst`) y el binario del kernel (`vmlinuz`) tenían **versiones internas diferentes**. El upgrade había instalado el kernel nuevo pero los módulos habían quedado de una versión intermedia. El kernel rechazaba cargar sus propios drivers por incompatibilidad de firma interna (`vermagic`).
+
+La solución: reinstalar completamente el kernel y sus módulos desde un chroot, regenerar el initramfs con dracut en modo `--no-hostonly`, y reconstruir la configuración de GRUB.
+
+**Resultado: sistema funcionando.** Ubuntu 26.04 arrancó correctamente.
+
+---
+
+## 🎯 ¿Qué resuelve esta guía?
+
+Esta guía resuelve específicamente el siguiente escenario:
+
+| Condición | Detalle |
+|---|---|
+| **Sistema origen** | Ubuntu 24.04 LTS |
+| **Sistema destino** | Ubuntu 26.04 LTS |
+| **Método de upgrade** | `sudo do-release-upgrade` |
+| **Tipo de fallo** | Upgrade interrumpido (cualquier causa) |
+| **Síntoma principal** | Shell de initramfs/dracut al arrancar |
+| **Causa subyacente** | Módulos del kernel incompatibles + dracut no instalado |
+| **Tipo de disco** | NVMe (documentado con Micron 2500, aplica a otros) |
+| **Firmware** | UEFI (con nota para BIOS Legacy) |
+| **Dual boot** | Compatible con Windows 11 en el mismo equipo |
+
+### Lo que NO daña esta guía
+- ✅ Los datos del disco están intactos y seguros
+- ✅ La instalación de Windows (en dual boot) no se toca
+- ✅ No requiere reinstalar Ubuntu desde cero
+- ✅ Funciona aunque no tengas un USB de Ubuntu — sirve cualquier Live USB basado en Ubuntu (Linux Mint, Xubuntu, etc.)
+
+---
+
+## 📁 Contenido de este repositorio
+
+```
+ubuntu-26-upgrade-recovery/
+│
+├── README.md                    ← Estás aquí: historia y contexto
+│
+├── GUIA-PASO-A-PASO.md          ← La guía completa de recuperación
+│
+├── scripts/
+│   ├── rescue-mount.sh          ← Monta el sistema dañado automáticamente
+│   ├── diagnose.sh              ← Detecta qué falló y qué pasos seguir
+│   └── fix-kernel-modules.sh   ← Repara los módulos y regenera el initramfs
+│
+└── cases/
+    └── micron-2500-lenovo-ubuntu26.md  ← Caso documentado en detalle
 ```
 
 ---
 
-## Causas comunes del upgrade fallido
+## ⚡ Inicio rápido
 
-| Causa | Síntoma en el upgrade |
-| --- | --- |
-| Falta de espacio en `/boot` | Error al descomprimir paquetes del kernel |
-| Corte de luz o reinicio forzado | Paquetes en estado `half-installed` |
-| Pérdida de conexión a internet | `apt` no puede descargar paquetes del nuevo kernel |
-| Timeout del proceso | El upgrade se interrumpe silenciosamente |
+Si ya sabés lo que hacés y solo querés los comandos:
+
+```bash
+# 1. Desde el Live USB, montar el sistema dañado
+bash scripts/rescue-mount.sh nvme0n1p5 nvme0n1p1
+
+# 2. Entrar al chroot
+sudo chroot /mnt/rescate
+
+# 3. Ejecutar el script de diagnóstico y reparación
+bash /fix-kernel-modules.sh
+
+# 4. Salir y reiniciar
+exit && sudo umount -R /mnt/rescate && sudo reboot
+```
+
+Para el proceso completo con explicaciones → **[GUIA-PASO-A-PASO.md](GUIA-PASO-A-PASO.md)**
 
 ---
 
-## Contexto técnico: los cambios de Ubuntu 26.04
+## 🤝 Contribuciones
 
-- **Ubuntu 26.04** es la primera versión LTS en usar **dracut** como generador de initramfs por defecto (reemplazando a `initramfs-tools`, que queda instalado por compatibilidad pero ya no genera la imagen que usa GRUB).
-- Si usás `update-initramfs` (herramienta de `initramfs-tools`) en un sistema 26.04, la imagen generada **es ignorada** por el hook de instalación de kernels, que usa dracut. Por eso los pasos con `update-initramfs -u` no funcionan en 26.04.
-- Para regenerar el initramfs correctamente en 26.04, siempre usá **`dracut --force`**.
+¿Te pasó algo similar con hardware diferente? ¿Encontraste un paso que no funciona en tu configuración?  
+Abrí un Issue o un Pull Request — cada caso documentado ayuda a la próxima persona que googlee este error a las 2 de la madrugada.
+
+Ver [CONTRIBUTING.md](CONTRIBUTING.md) para cómo reportar un caso.
 
 ---
 
-## Créditos y referencias
+## 📄 Licencia
 
-- Diagnóstico y guía desarrollados colaborativamente resolviendo un caso real (octubre 2026).
-- [Ubuntu 26.04 dracut migration announcement](https://discourse.ubuntu.com/t/spec-switch-to-dracut/54776)
-- [Documentación de dracut](https://dracut-ng.github.io/dracut/)
+[Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/)  
+Podés compartir y adaptar este contenido libremente citando la fuente.
+
+---
+
+*Documentado en tiempo real — octubre 2026.*
