@@ -126,7 +126,7 @@ Para el proceso completo con explicaciones → **[GUIA-PASO-A-PASO.md](GUIA-PASO
 
 ## 🤝 Contribuciones
 
-¿Te pasó algo similar con hardware diferente? ¿Encontraste un paso que no funciona en tu configuración?  
+¿Te pasó algo similar con hardware diferente? ¿Encontraste un paso que no funciona en tu configuración?
 Abrí un Issue o un Pull Request — cada caso documentado ayuda a la próxima persona que googlee este error a las 2 de la madrugada.
 
 Ver [CONTRIBUTING.md](CONTRIBUTING.md) para cómo reportar un caso.
@@ -135,7 +135,7 @@ Ver [CONTRIBUTING.md](CONTRIBUTING.md) para cómo reportar un caso.
 
 ## 📄 Licencia
 
-[Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/)  
+[Creative Commons Attribution 4.0 International (CC BY 4.0)](LICENSE)
 Podés compartir y adaptar este contenido libremente citando la fuente.
 
 ---
